@@ -15,6 +15,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		46B8F1062BD7E10000A10001 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		46B8F0012BD7E10000A10001 /* TAKE CONTROLLER - Helix Stadium MIDI Messager.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "TAKE CONTROLLER - Helix Stadium MIDI Messager.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		46B8F1012BD7E10000A10001 /* HelixMIDIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelixMIDIApp.swift; sourceTree = "<group>"; };
 		46B8F1022BD7E10000A10001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -37,9 +38,18 @@
 		46B8F0102BD7E10000A10001 = {
 			isa = PBXGroup;
 			children = (
+				46B8F0902BD7E10000A10001 /* Config */,
 				46B8F0202BD7E10000A10001 /* HelixMIDI */,
 				46B8F0302BD7E10000A10001 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		46B8F0902BD7E10000A10001 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				46B8F1062BD7E10000A10001 /* Signing.xcconfig */,
+			);
+			path = Config;
 			sourceTree = "<group>";
 		};
 		46B8F0202BD7E10000A10001 /* HelixMIDI */ = {
@@ -258,10 +268,10 @@
 		};
 		46B8F0812BD7E10000A10001 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 46B8F1062BD7E10000A10001 /* Signing.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "TAKE CTRL";
 				INFOPLIST_KEY_CFBundleName = "TAKE CONTROLLER";
@@ -284,10 +294,10 @@
 		};
 		46B8F0822BD7E10000A10001 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 46B8F1062BD7E10000A10001 /* Signing.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "TAKE CTRL";
 				INFOPLIST_KEY_CFBundleName = "TAKE CONTROLLER";

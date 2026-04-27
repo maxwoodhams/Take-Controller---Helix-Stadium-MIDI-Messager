@@ -1,0 +1,6 @@
+// Public signing defaults. Put personal signing values in LocalSigning.xcconfig.
+LOCAL_DEVELOPMENT_TEAM =
+
+#include? "LocalSigning.xcconfig"
+
+DEVELOPMENT_TEAM = $(LOCAL_DEVELOPMENT_TEAM)

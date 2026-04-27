@@ -4,3 +4,13 @@ DerivedData/
 .build/
 .swiftpm/
 .module-cache/
+
+# Apple code signing and provisioning
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+*.certSigningRequest
+*.xcarchive
+ExportOptions.plist
+Config/LocalSigning.xcconfig
