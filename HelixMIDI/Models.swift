@@ -113,6 +113,32 @@ final class ControllerStore: ObservableObject {
         }
     }
 
+    func exportSettingsData() throws -> Data {
+        let snapshot = ControllerSettingsSnapshot(
+            version: 1,
+            selectedPlaylist: selectedPlaylist,
+            selectedSong: selectedSong,
+            playlistNames: Self.encodeNames(playlistNames),
+            songNames: Self.encodeNames(songNames),
+            buttons: buttons
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(snapshot)
+    }
+
+    func importSettingsData(_ data: Data) throws {
+        let snapshot = try JSONDecoder().decode(ControllerSettingsSnapshot.self, from: data)
+        let importedButtons = try Self.validatedButtons(snapshot.buttons)
+
+        buttons = importedButtons
+        selectedPlaylist = snapshot.selectedPlaylist.clamped(to: 0...127)
+        selectedSong = snapshot.selectedSong.clamped(to: 0...127)
+        playlistNames = Self.decodeNames(snapshot.playlistNames)
+        songNames = Self.decodeNames(snapshot.songNames)
+    }
+
     private func normalizedName(_ name: String) -> String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -123,11 +149,7 @@ final class ControllerStore: ObservableObject {
     }
 
     private func saveNames(_ names: [Int: String], key: String) {
-        let encoded = names.reduce(into: [String: String]()) { result, item in
-            result[String(item.key)] = item.value
-        }
-
-        defaults.set(encoded, forKey: key)
+        defaults.set(Self.encodeNames(names), forKey: key)
     }
 
     private static func loadButtons(from defaults: UserDefaults) -> [ControlButton] {
@@ -136,13 +158,21 @@ final class ControllerStore: ObservableObject {
             return ControlButton.defaultButtons
         }
 
-        let defaultIDs = Set(ControlButton.defaultButtons.map(\.id))
-        let decodedIDs = Set(decoded.map(\.id))
-        guard defaultIDs == decodedIDs else {
+        guard let validated = try? validatedButtons(decoded) else {
             return ControlButton.defaultButtons
         }
 
-        return decoded
+        return validated
+    }
+
+    private static func validatedButtons(_ buttons: [ControlButton]) throws -> [ControlButton] {
+        let defaultIDs = Set(ControlButton.defaultButtons.map(\.id))
+        let importedIDs = Set(buttons.map(\.id))
+        guard defaultIDs == importedIDs, buttons.count == ControlButton.defaultButtons.count else {
+            throw SettingsImportError.incompatibleButtons
+        }
+
+        return buttons
     }
 
     private static func loadNames(from defaults: UserDefaults, key: String) -> [Int: String] {
@@ -150,7 +180,17 @@ final class ControllerStore: ObservableObject {
             return [:]
         }
 
-        return stored.reduce(into: [Int: String]()) { result, item in
+        return decodeNames(stored)
+    }
+
+    private static func encodeNames(_ names: [Int: String]) -> [String: String] {
+        names.reduce(into: [String: String]()) { result, item in
+            result[String(item.key)] = item.value
+        }
+    }
+
+    private static func decodeNames(_ names: [String: String]) -> [Int: String] {
+        names.reduce(into: [Int: String]()) { result, item in
             if let value = Int(item.key), (0...127).contains(value) {
                 result[value] = item.value
             }
@@ -163,6 +203,26 @@ final class ControllerStore: ObservableObject {
         static let selectedSong = "selectedSong"
         static let playlistNames = "playlistNames"
         static let songNames = "songNames"
+    }
+}
+
+struct ControllerSettingsSnapshot: Codable {
+    let version: Int
+    let selectedPlaylist: Int
+    let selectedSong: Int
+    let playlistNames: [String: String]
+    let songNames: [String: String]
+    let buttons: [ControlButton]
+}
+
+enum SettingsImportError: LocalizedError {
+    case incompatibleButtons
+
+    var errorDescription: String? {
+        switch self {
+        case .incompatibleButtons:
+            return "This settings file was made for a different button layout."
+        }
     }
 }
 

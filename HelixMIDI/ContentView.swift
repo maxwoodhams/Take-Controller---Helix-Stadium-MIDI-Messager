@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var store: ControllerStore
@@ -8,6 +9,11 @@ struct ContentView: View {
     @State private var draggedButton: ControlButton?
     @State private var renameTarget: RenameTarget?
     @State private var renameText = ""
+    @State private var isSettingsPresented = false
+    @State private var isExporterPresented = false
+    @State private var isImporterPresented = false
+    @State private var exportDocument = ControllerSettingsDocument()
+    @State private var settingsError: SettingsError?
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 18), count: 4)
 
@@ -30,6 +36,14 @@ struct ContentView: View {
 
                 ToolbarItem(placement: .automatic) {
                     Button {
+                        isSettingsPresented = true
+                    } label: {
+                        Label("Settings", systemImage: "gearshape.fill")
+                    }
+                }
+
+                ToolbarItem(placement: .automatic) {
+                    Button {
                         midi.refreshDestinations()
                     } label: {
                         Label("Refresh MIDI", systemImage: "arrow.clockwise")
@@ -39,6 +53,33 @@ struct ContentView: View {
             .sheet(item: $renameTarget) { target in
                 renameSheet(for: target)
                     .presentationDetents([.height(260)])
+            }
+            .sheet(isPresented: $isSettingsPresented) {
+                settingsSheet
+                    .presentationDetents([.height(260)])
+            }
+            .fileExporter(
+                isPresented: $isExporterPresented,
+                document: exportDocument,
+                contentType: .json,
+                defaultFilename: "Take Controller Settings"
+            ) { result in
+                if case .failure(let error) = result {
+                    settingsError = SettingsError(message: error.localizedDescription)
+                }
+            }
+            .fileImporter(
+                isPresented: $isImporterPresented,
+                allowedContentTypes: [.json]
+            ) { result in
+                importSettings(from: result)
+            }
+            .alert(item: $settingsError) { error in
+                Alert(
+                    title: Text("Settings Error"),
+                    message: Text(error.message),
+                    dismissButton: .default(Text("OK"))
+                )
             }
             .onChange(of: store.selectedPlaylist) { _, newValue in
                 midi.sendControlChange(63, value: UInt8(newValue))
@@ -186,6 +227,48 @@ struct ContentView: View {
             : Color(red: 0.37, green: 0.40, blue: 0.46)
     }
 
+    private var settingsSheet: some View {
+        NavigationStack {
+            VStack(spacing: 14) {
+                Button {
+                    exportSettings()
+                } label: {
+                    Label("Export Settings", systemImage: "square.and.arrow.up")
+                        .font(.headline.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(.takeCyan)
+
+                Button {
+                    isSettingsPresented = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        isImporterPresented = true
+                    }
+                } label: {
+                    Label("Import Settings", systemImage: "square.and.arrow.down")
+                        .font(.headline.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .tint(.takeRed)
+
+                Spacer()
+            }
+            .padding(24)
+            .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        isSettingsPresented = false
+                    }
+                }
+            }
+        }
+    }
+
     private func renameSheet(for target: RenameTarget) -> some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
@@ -235,6 +318,34 @@ struct ContentView: View {
         renameTarget = nil
     }
 
+    private func exportSettings() {
+        do {
+            exportDocument = ControllerSettingsDocument(data: try store.exportSettingsData())
+            isSettingsPresented = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                isExporterPresented = true
+            }
+        } catch {
+            settingsError = SettingsError(message: error.localizedDescription)
+        }
+    }
+
+    private func importSettings(from result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            let isScoped = url.startAccessingSecurityScopedResource()
+            defer {
+                if isScoped {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            try store.importSettingsData(Data(contentsOf: url))
+        } catch {
+            settingsError = SettingsError(message: error.localizedDescription)
+        }
+    }
+
     private func palette(for button: ControlButton) -> ButtonPalette {
         switch button.id {
         case "returnToZero":
@@ -255,6 +366,29 @@ struct ContentView: View {
             return ButtonPalette(base: .takeIndigo, secondary: .takeViolet, icon: "playpause.fill")
         }
     }
+}
+
+private struct ControllerSettingsDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+
+    var data: Data
+
+    init(data: Data = Data()) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+private struct SettingsError: Identifiable {
+    let id = UUID()
+    let message: String
 }
 
 private enum RenameTarget: Identifiable {
