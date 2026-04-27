@@ -85,11 +85,19 @@ final class ControllerStore: ObservableObject {
     }
 
     func renameSelectedPlaylist(_ name: String) {
-        playlistNames[selectedPlaylist] = normalizedName(name)
+        renamePlaylist(selectedPlaylist, name)
     }
 
     func renameSelectedSong(_ name: String) {
-        songNames[selectedSong] = normalizedName(name)
+        renameSong(selectedSong, name)
+    }
+
+    func renamePlaylist(_ value: Int, _ name: String) {
+        playlistNames[value.clamped(to: 0...127)] = normalizedName(name)
+    }
+
+    func renameSong(_ value: Int, _ name: String) {
+        songNames[value.clamped(to: 0...127)] = normalizedName(name)
     }
 
     func moveButton(from source: ControlButton, to destination: ControlButton) {

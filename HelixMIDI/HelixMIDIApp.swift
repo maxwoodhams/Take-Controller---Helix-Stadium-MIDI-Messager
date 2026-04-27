@@ -10,6 +10,7 @@ struct HelixMIDIApp: App {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(midi)
+                .preferredColorScheme(.dark)
         }
     }
 }
