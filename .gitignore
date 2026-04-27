@@ -14,3 +14,6 @@ DerivedData/
 *.xcarchive
 ExportOptions.plist
 Config/LocalSigning.xcconfig
+Config/Local*.xcconfig
+Config/*.local.xcconfig
+Config/*Signing.local.xcconfig
