@@ -1,5 +1,8 @@
+import CoreMIDI
 import SwiftUI
 import UniformTypeIdentifiers
+
+private let allMIDIDestinationsID = MIDIUniqueID.min
 
 struct ContentView: View {
     @EnvironmentObject private var store: ControllerStore
@@ -56,7 +59,7 @@ struct ContentView: View {
             }
             .sheet(isPresented: $isSettingsPresented) {
                 settingsSheet
-                    .presentationDetents([.height(260)])
+                    .presentationDetents([.height(390)])
             }
             .fileExporter(
                 isPresented: $isExporterPresented,
@@ -230,6 +233,8 @@ struct ContentView: View {
     private var settingsSheet: some View {
         NavigationStack {
             VStack(spacing: 14) {
+                midiDestinationSettings
+
                 Button {
                     exportSettings()
                 } label: {
@@ -265,6 +270,64 @@ struct ContentView: View {
                         isSettingsPresented = false
                     }
                 }
+            }
+        }
+    }
+
+    private var midiDestinationSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("MIDI Destination", systemImage: "cable.connector")
+                    .font(.headline.weight(.black))
+
+                Spacer()
+
+                Button {
+                    midi.refreshDestinations()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .bold))
+                }
+                .buttonStyle(.bordered)
+                .disabled(midi.destinations.isEmpty)
+            }
+
+            Picker("MIDI Destination", selection: midiDestinationSelection) {
+                Text("All Destinations")
+                    .tag(allMIDIDestinationsID)
+
+                ForEach(midi.destinations) { destination in
+                    Text(destination.name)
+                        .tag(destination.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.large)
+            .tint(.takeCyan)
+            .disabled(midi.destinations.isEmpty)
+
+            Text(midi.destinations.isEmpty ? "No MIDI destinations found" : midi.statusMessage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(secondaryText)
+                .lineLimit(2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(panelBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(panelStroke, lineWidth: 1)
+        )
+    }
+
+    private var midiDestinationSelection: Binding<MIDIUniqueID> {
+        Binding {
+            midi.selectedDestinationID ?? allMIDIDestinationsID
+        } set: { selectedID in
+            if selectedID == allMIDIDestinationsID {
+                midi.selectAllDestinations()
+            } else if let destination = midi.destinations.first(where: { $0.id == selectedID }) {
+                midi.selectDestination(destination)
             }
         }
     }
