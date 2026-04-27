@@ -7,6 +7,8 @@ AI made this. I just had a need. Not a need for speed, although I recently DID j
 
 It Just Works. Plug in a USB-C to MIDI dongle to your iPad, and violá. 
 
+<img width="1180" height="820" alt="Screenshot 2026-04-27 at 21 59 46" src="https://github.com/user-attachments/assets/1c281c15-d13d-4553-9d09-09550fb29c51" />  
+<p></p> 
 You can label the songs and playlists and it'll persist.
 
 Anyway, I've enjoyed making this not very professional. I hope if you find it, this helps in some small way.
