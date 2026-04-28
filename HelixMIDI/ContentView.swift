@@ -17,8 +17,10 @@ struct ContentView: View {
     @State private var isImporterPresented = false
     @State private var exportDocument = ControllerSettingsDocument()
     @State private var settingsError: SettingsError?
+    @State private var isCurrentSongPendingPlayPause = false
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 18), count: 4)
+    private let currentSongFlash = Animation.easeInOut(duration: 0.52).repeatForever(autoreverses: true)
 
     var body: some View {
         NavigationStack {
@@ -33,6 +35,10 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(appBackground.ignoresSafeArea())
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    playlistMenu
+                }
+
                 ToolbarItem(placement: .principal) {
                     titleView
                 }
@@ -88,6 +94,7 @@ struct ContentView: View {
                 midi.sendControlChange(63, value: UInt8(newValue))
             }
             .onChange(of: store.selectedSong) { _, newValue in
+                isCurrentSongPendingPlayPause = true
                 midi.sendControlChange(10, value: UInt8(newValue))
             }
         }
@@ -117,21 +124,44 @@ struct ContentView: View {
         }
     }
 
+    private var playlistMenu: some View {
+        Menu {
+            Picker("Playlist", selection: $store.selectedPlaylist) {
+                ForEach(0...127, id: \.self) { value in
+                    Text("\(value) - \(store.title(forPlaylist: value))")
+                        .tag(value)
+                }
+            }
+
+            Divider()
+
+            Button {
+                renameText = store.playlistNames[store.selectedPlaylist] ?? ""
+                renameTarget = .playlist(store.selectedPlaylist)
+            } label: {
+                Label("Rename Playlist", systemImage: "pencil")
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "music.note.list")
+                    .font(.system(size: 15, weight: .bold))
+
+                Text("\(store.selectedPlaylist)")
+                    .font(.headline.monospacedDigit().weight(.black))
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .bold))
+            }
+            .foregroundStyle(Color.takeRed)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(Color.takeRed.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+
     private var libraryPanel: some View {
         HStack(spacing: 18) {
-            LibrarySelectorView(
-                kind: .playlist,
-                value: $store.selectedPlaylist,
-                title: store.title(forPlaylist: store.selectedPlaylist),
-                accent: .takeRed,
-                secondaryText: secondaryText,
-                panelStroke: panelStroke,
-                displayName: { store.title(forPlaylist: $0) },
-                rename: {
-                    renameText = store.playlistNames[store.selectedPlaylist] ?? ""
-                    renameTarget = .playlist(store.selectedPlaylist)
-                }
-            )
+            currentSongPanel
 
             LibrarySelectorView(
                 kind: .song,
@@ -149,11 +179,81 @@ struct ContentView: View {
         }
     }
 
+    private var currentSongPanel: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.takeCyan.opacity(0.16))
+
+                    Image(systemName: "music.note")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(Color.takeCyan)
+                }
+                .frame(width: 54, height: 54)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text("Current Song")
+                            .font(.headline.weight(.black))
+
+                        Text("LAST KNOWN")
+                            .font(.caption.weight(.black))
+                            .foregroundStyle(Color.takeCyan)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(Color.takeCyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+
+                    Text(store.title(forPlaylist: store.selectedPlaylist))
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(secondaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                }
+
+                Spacer()
+            }
+
+            Text(store.title(forSong: store.selectedSong))
+                .font(.system(size: 34, weight: .black, design: .rounded))
+                .lineLimit(2)
+                .minimumScaleFactor(0.70)
+                .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+                .opacity(isCurrentSongPendingPlayPause ? 0.42 : 1)
+                .animation(isCurrentSongPendingPlayPause ? currentSongFlash : .default, value: isCurrentSongPendingPlayPause)
+
+            HStack(spacing: 12) {
+                Text("Song \(store.selectedSong)")
+                    .font(.title3.monospacedDigit().weight(.black))
+                    .foregroundStyle(Color.takeCyan)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    renameText = store.songNames[store.selectedSong] ?? ""
+                    renameTarget = .song(store.selectedSong)
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                        .font(.callout.weight(.bold))
+                }
+                .buttonStyle(.bordered)
+                .tint(.takeCyan)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(panelStroke, lineWidth: 1)
+        )
+    }
+
     private var buttonGrid: some View {
         LazyVGrid(columns: columns, spacing: 18) {
             ForEach(store.buttons) { button in
-                ControlButtonView(button: button, palette: palette(for: button)) {
-                    midi.sendControlChange(button.controlChange, value: button.midiValue)
+                ControlButtonView(button: button, palette: palette(for: button), previewText: previewText(for: button)) {
+                    trigger(button)
                 }
                 .draggable(button.id)
                 .dropDestination(for: String.self) { items, _ in
@@ -175,6 +275,38 @@ struct ContentView: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .center)
+    }
+
+    private func trigger(_ button: ControlButton) {
+        midi.sendControlChange(button.controlChange, value: button.midiValue)
+
+        switch button.id {
+        case "previousSong":
+            store.selectedSong = adjacentSong(offset: -1)
+        case "nextSong":
+            store.selectedSong = adjacentSong(offset: 1)
+        case "playPause":
+            isCurrentSongPendingPlayPause = false
+        default:
+            break
+        }
+    }
+
+    private func adjacentSong(offset: Int) -> Int {
+        min(max(store.selectedSong + offset, 0), 127)
+    }
+
+    private func previewText(for button: ControlButton) -> String? {
+        switch button.id {
+        case "previousSong":
+            let value = adjacentSong(offset: -1)
+            return "Would select \(value) - \(store.title(forSong: value))"
+        case "nextSong":
+            let value = adjacentSong(offset: 1)
+            return "Would select \(value) - \(store.title(forSong: value))"
+        default:
+            return nil
+        }
     }
 
     private var midiFooter: some View {
@@ -670,6 +802,7 @@ private struct ControlButtonView: View {
 
     let button: ControlButton
     let palette: ButtonPalette
+    let previewText: String?
     let action: () -> Void
 
     var body: some View {
@@ -699,9 +832,11 @@ private struct ControlButtonView: View {
                         .lineLimit(3)
                         .minimumScaleFactor(0.76)
 
-                    Text(detailText)
+                    Text(previewText ?? detailText)
                         .font(.subheadline.monospacedDigit().weight(.semibold))
                         .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.78)
                 }
             }
             .frame(maxWidth: .infinity)
