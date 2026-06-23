@@ -3,6 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private let allMIDIDestinationsID = MIDIUniqueID.min
+private let allMIDISourcesID = MIDIUniqueID.max
 
 struct ContentView: View {
     @EnvironmentObject private var store: ControllerStore
@@ -18,9 +19,14 @@ struct ContentView: View {
     @State private var exportDocument = ControllerSettingsDocument()
     @State private var settingsError: SettingsError?
     @State private var isCurrentSongPendingPlayPause = false
+    @State private var isApplyingMIDISync = false
+    @State private var isPlaybackRunning = false
+    @State private var isMonitorPresented = false
+    @State private var flashOn = false
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 18), count: 4)
-    private let currentSongFlash = Animation.easeInOut(duration: 0.52).repeatForever(autoreverses: true)
+    // Hard on/off blink (not smooth) for the cued-song indicator — easy to read on a dark stage.
+    private let flashClock = Timer.publish(every: 0.26, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationStack {
@@ -35,10 +41,6 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(appBackground.ignoresSafeArea())
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    playlistMenu
-                }
-
                 ToolbarItem(placement: .principal) {
                     titleView
                 }
@@ -54,6 +56,7 @@ struct ContentView: View {
                 ToolbarItem(placement: .automatic) {
                     Button {
                         midi.refreshDestinations()
+                        midi.refreshSources()
                     } label: {
                         Label("Refresh MIDI", systemImage: "arrow.clockwise")
                     }
@@ -65,7 +68,10 @@ struct ContentView: View {
             }
             .sheet(isPresented: $isSettingsPresented) {
                 settingsSheet
-                    .presentationDetents([.height(390)])
+                    .presentationDetents([.large])
+            }
+            .sheet(isPresented: $isMonitorPresented) {
+                MIDIMonitorView(midi: midi)
             }
             .fileExporter(
                 isPresented: $isExporterPresented,
@@ -90,12 +96,27 @@ struct ContentView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
-            .onChange(of: store.selectedPlaylist) { _, newValue in
-                midi.sendControlChange(63, value: UInt8(newValue))
+            .onChange(of: midi.latestSyncEvent) { _, event in
+                guard let event else { return }
+                applyMIDISync(event)
             }
             .onChange(of: store.selectedSong) { _, newValue in
+                guard !isApplyingMIDISync else { return }
                 isCurrentSongPendingPlayPause = true
-                midi.sendControlChange(10, value: UInt8(newValue))
+                isPlaybackRunning = false
+                // Cue by playlist POSITION (what the Stadium expects), not the song's identity.
+                let cue = store.cuePosition(forSong: newValue) ?? newValue
+                midi.sendControlChange(10, value: UInt8(cue))
+            }
+            .overlay {
+                if midi.isScanning {
+                    scanOverlay
+                }
+            }
+            .onReceive(flashClock) { _ in
+                if isCurrentSongPendingPlayPause {
+                    flashOn.toggle()
+                }
             }
         }
     }
@@ -124,124 +145,152 @@ struct ContentView: View {
         }
     }
 
-    private var playlistMenu: some View {
-        Menu {
-            Picker("Playlist", selection: $store.selectedPlaylist) {
-                ForEach(0...127, id: \.self) { value in
-                    Text("\(value) - \(store.title(forPlaylist: value))")
-                        .tag(value)
-                }
-            }
-
-            Divider()
-
-            Button {
-                renameText = store.playlistNames[store.selectedPlaylist] ?? ""
-                renameTarget = .playlist(store.selectedPlaylist)
-            } label: {
-                Label("Rename Playlist", systemImage: "pencil")
-            }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "music.note.list")
-                    .font(.system(size: 15, weight: .bold))
-
-                Text("\(store.selectedPlaylist)")
-                    .font(.headline.monospacedDigit().weight(.black))
-
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 11, weight: .bold))
-            }
-            .foregroundStyle(Color.takeRed)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Color.takeRed.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-    }
 
     private var libraryPanel: some View {
         HStack(spacing: 18) {
-            currentSongPanel
+            activeSetlistPanel
 
             LibrarySelectorView(
                 kind: .song,
                 value: $store.selectedSong,
                 title: store.title(forSong: store.selectedSong),
+                order: store.songPickerOrder,
                 accent: .takeCyan,
                 secondaryText: secondaryText,
                 panelStroke: panelStroke,
-                displayName: { store.title(forSong: $0) },
-                rename: {
-                    renameText = store.songNames[store.selectedSong] ?? ""
-                    renameTarget = .song(store.selectedSong)
-                }
+                displayName: { store.title(forSong: $0) }
             )
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
-    private var currentSongPanel: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 14) {
+    private var activeSelectionName: String {
+        if let slot = store.activeSetlistSlot { return store.setlistName(slot) }
+        return "Song Library"
+    }
+
+    private var activeSetlistPanel: some View {
+        let isLibrary = store.activeSetlistSlot == nil
+        let accent = isLibrary ? Color.takeCyan : Color.takeViolet
+
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 14) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.takeCyan.opacity(0.16))
-
-                    Image(systemName: "music.note")
+                        .fill(accent.opacity(0.16))
+                    Image(systemName: isLibrary ? "music.note.list" : "list.number")
                         .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(Color.takeCyan)
+                        .foregroundStyle(accent)
                 }
                 .frame(width: 54, height: 54)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text("Current Song")
-                            .font(.headline.weight(.black))
+                    Text(isLibrary ? "LIBRARY" : "SETLIST")
+                        .font(.caption.weight(.black))
+                        .foregroundStyle(accent)
 
-                        Text("LAST KNOWN")
-                            .font(.caption.weight(.black))
-                            .foregroundStyle(Color.takeCyan)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(Color.takeCyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    }
-
-                    Text(store.title(forPlaylist: store.selectedPlaylist))
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(secondaryText)
+                    Text(activeSelectionName)
+                        .font(.title2.weight(.black))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.78)
+                        .minimumScaleFactor(0.7)
+                }
+
+                if !isLibrary {
+                    Button {
+                        store.activeSetlistSlot = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Back to Song Library")
                 }
 
                 Spacer()
+
+                Text("\(store.songPickerOrder.count) songs")
+                    .font(.caption.monospacedDigit().weight(.bold))
+                    .foregroundStyle(secondaryText)
             }
 
-            Text(store.title(forSong: store.selectedSong))
-                .font(.system(size: 34, weight: .black, design: .rounded))
-                .lineLimit(2)
-                .minimumScaleFactor(0.70)
-                .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
-                .opacity(isCurrentSongPendingPlayPause ? 0.42 : 1)
-                .animation(isCurrentSongPendingPlayPause ? currentSongFlash : .default, value: isCurrentSongPendingPlayPause)
+            HStack(spacing: 10) {
+                Menu {
+                    Button {
+                        store.activeSetlistSlot = nil
+                    } label: {
+                        Label("Library", systemImage: isLibrary ? "checkmark" : "music.note.list")
+                    }
 
-            HStack(spacing: 12) {
-                Text("Song \(store.selectedSong)")
-                    .font(.title3.monospacedDigit().weight(.black))
-                    .foregroundStyle(Color.takeCyan)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if !store.setlistSlots.isEmpty {
+                        Divider()
+                        ForEach(store.setlistSlots, id: \.self) { slot in
+                            Button {
+                                store.activeSetlistSlot = slot
+                            } label: {
+                                Label(store.setlistName(slot), systemImage: store.activeSetlistSlot == slot ? "checkmark" : "list.number")
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Button {
+                        store.createSetlist()
+                    } label: {
+                        Label("New Setlist", systemImage: "plus")
+                    }
+
+                    if let slot = store.activeSetlistSlot {
+                        Button {
+                            renameText = store.playlistNames[slot] ?? ""
+                            renameTarget = .playlist(slot)
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+
+                        Button(role: .destructive) {
+                            store.clearActiveSetlist()
+                        } label: {
+                            Label("Clear Songs", systemImage: "xmark.circle")
+                        }
+
+                        Button(role: .destructive) {
+                            store.deleteActiveSetlist()
+                        } label: {
+                            Label("Delete Setlist", systemImage: "trash")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 14, weight: .bold))
+                        Text("Setlist")
+                            .font(.callout.weight(.bold))
+                        Spacer()
+                    }
+                    .foregroundStyle(accent)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 11)
+                    .frame(maxWidth: .infinity)
+                    .background(accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
 
                 Button {
-                    renameText = store.songNames[store.selectedSong] ?? ""
-                    renameTarget = .song(store.selectedSong)
+                    runSongScan()
                 } label: {
-                    Label("Rename", systemImage: "pencil")
+                    Label("Sync", systemImage: "dot.radiowaves.left.and.right")
                         .font(.callout.weight(.bold))
+                        .padding(.vertical, 4)
                 }
-                .buttonStyle(.bordered)
-                .tint(.takeCyan)
+                .buttonStyle(.borderedProminent)
+                .tint(.takeGreen)
+                .disabled(midi.isScanning)
             }
         }
         .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -254,6 +303,11 @@ struct ContentView: View {
             ForEach(store.buttons) { button in
                 ControlButtonView(button: button, palette: palette(for: button), previewText: previewText(for: button)) {
                     trigger(button)
+                }
+                .overlay {
+                    if button.id == "playPause" {
+                        playPauseStatusOverlay
+                    }
                 }
                 .draggable(button.id)
                 .dropDestination(for: String.self) { items, _ in
@@ -277,23 +331,126 @@ struct ContentView: View {
         .frame(maxHeight: .infinity, alignment: .center)
     }
 
-    private func trigger(_ button: ControlButton) {
-        midi.sendControlChange(button.controlChange, value: button.midiValue)
+    /// Over the Play/Pause pad: the current track plus its transport state. Hard-blinks
+    /// (gold ⇄ normal) while a song is cued but not yet played; static once playing/paused.
+    private var playPauseStatusOverlay: some View {
+        let name = store.title(forSong: store.selectedSong)
+        let pending = isCurrentSongPendingPlayPause
 
+        let label = pending
+            ? name
+            : (isPlaybackRunning ? "\(name) — PLAYING" : "\(name) — PAUSED")
+
+        return Text(label)
+            .font(.system(size: 19, weight: .heavy))
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .lineLimit(3)
+            .minimumScaleFactor(0.5)
+            .padding(14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Cued: the label blinks hard from 0 → 100 opacity. Playing/paused: solid, no
+            // change to the button itself.
+            .opacity(pending && !flashOn ? 0 : 1)
+            .animation(nil, value: flashOn)
+            .allowsHitTesting(false)
+    }
+
+    private func trigger(_ button: ControlButton) {
         switch button.id {
+        case "cycleClear":
+            stopTransport()
+            return
         case "previousSong":
+            // Walk the active setlist (or numeric ±1 if empty). Changing selectedSong
+            // fires CC 10 via onChange — we deliberately do not send the CC 49 step.
             store.selectedSong = adjacentSong(offset: -1)
+            return
         case "nextSong":
             store.selectedSong = adjacentSong(offset: 1)
-        case "playPause":
-            isCurrentSongPendingPlayPause = false
+            return
         default:
             break
+        }
+
+        midi.sendControlChange(button.controlChange, value: button.midiValue)
+
+        if button.id == "playPause" {
+            isCurrentSongPendingPlayPause = false
+            isPlaybackRunning.toggle()
         }
     }
 
     private func adjacentSong(offset: Int) -> Int {
-        min(max(store.selectedSong + offset, 0), 127)
+        store.adjacentSong(from: store.selectedSong, offset: offset)
+    }
+
+    private func runSongScan() {
+        guard !midi.isScanning else { return }
+        let limit = store.syncScanLimit
+        Task {
+            if let order = await midi.scanSongs(upTo: limit) {
+                store.applyScannedOrder(order)
+            }
+        }
+    }
+
+    private var scanOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Text("Discovering Setlist Order")
+                    .font(.title2.weight(.black))
+
+                ProgressView(value: Double(midi.scanProgress), total: Double(max(midi.scanTotal, 1)))
+                    .tint(.takeGreen)
+
+                Text("\(midi.scanFoundCount) songs in order  ·  position \(midi.scanProgress)")
+                    .font(.callout.monospacedDigit().weight(.bold))
+                    .foregroundStyle(secondaryText)
+
+                Button {
+                    midi.stopScan()
+                } label: {
+                    Label("Stop & Keep Found", systemImage: "stop.fill")
+                        .font(.headline.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(.takeRed)
+            }
+            .padding(28)
+            .frame(maxWidth: 380)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(40)
+        }
+    }
+
+
+    private func stopTransport() {
+        midi.sendStop(shouldTogglePlayPause: isPlaybackRunning)
+        isPlaybackRunning = false
+        isCurrentSongPendingPlayPause = false
+    }
+
+    private func applyMIDISync(_ event: MIDISyncEvent) {
+        isApplyingMIDISync = true
+
+        switch event.kind {
+        case .playlist:
+            break // Playlists are app-side only and pinned to 0 — ignore incoming CC 63.
+        case .song:
+            store.selectedSong = event.value
+            // A live marker means the Stadium is playing across 00:00 — reflect that.
+            isCurrentSongPendingPlayPause = false
+            isPlaybackRunning = true
+        }
+
+        DispatchQueue.main.async {
+            isApplyingMIDISync = false
+        }
     }
 
     private func previewText(for button: ControlButton) -> String? {
@@ -321,9 +478,15 @@ struct ContentView: View {
                     .foregroundStyle(midi.destinations.isEmpty ? Color.takeRed : Color.takeGreen)
             }
 
-            Text(midi.statusMessage)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(secondaryText)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(midi.statusMessage)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(secondaryText)
+
+                Text(midi.syncStatusMessage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(secondaryText.opacity(0.86))
+            }
 
             Spacer()
         }
@@ -364,37 +527,68 @@ struct ContentView: View {
 
     private var settingsSheet: some View {
         NavigationStack {
-            VStack(spacing: 14) {
-                midiDestinationSettings
+            ScrollView {
+                VStack(spacing: 14) {
+                    midiDestinationSettings
+                    midiSyncSourceSettings
+                    syncSongSettings
+                    syncScanSettings
 
-                Button {
-                    exportSettings()
-                } label: {
-                    Label("Export Settings", systemImage: "square.and.arrow.up")
-                        .font(.headline.weight(.bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .tint(.takeCyan)
-
-                Button {
-                    isSettingsPresented = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        isImporterPresented = true
+                    NavigationLink {
+                        SongEditorView()
+                    } label: {
+                        settingsRowLabel("Edit Songs", systemImage: "music.note.list", tint: .takeCyan)
                     }
-                } label: {
-                    Label("Import Settings", systemImage: "square.and.arrow.down")
-                        .font(.headline.weight(.bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .tint(.takeRed)
+                    .buttonStyle(.plain)
 
-                Spacer()
+                    NavigationLink {
+                        SetlistEditorView()
+                    } label: {
+                        settingsRowLabel("Edit Setlists", systemImage: "list.number", tint: .takeViolet)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        isSettingsPresented = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                            isMonitorPresented = true
+                        }
+                    } label: {
+                        Label("MIDI Monitor", systemImage: "waveform.path")
+                            .font(.headline.weight(.bold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .tint(.takeGreen)
+
+                    Button {
+                        exportSettings()
+                    } label: {
+                        Label("Export Settings", systemImage: "square.and.arrow.up")
+                            .font(.headline.weight(.bold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .tint(.takeCyan)
+
+                    Button {
+                        isSettingsPresented = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                            isImporterPresented = true
+                        }
+                    } label: {
+                        Label("Import Settings", systemImage: "square.and.arrow.down")
+                            .font(.headline.weight(.bold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .tint(.takeRed)
+                }
+                .padding(24)
             }
-            .padding(24)
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -404,6 +598,52 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var syncScanSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Songs to Scan", systemImage: "dot.radiowaves.left.and.right")
+                .font(.headline.weight(.black))
+
+            Stepper(value: $store.syncScanLimit, in: 1...127) {
+                Text("Scan songs 0–\(store.syncScanLimit)")
+                    .font(.callout.weight(.bold))
+                    .foregroundStyle(Color.takeGreen)
+            }
+
+            Text("SYNC probes slots 0 through \(store.syncScanLimit). Keep this just above your highest song number so the scan stays quick.")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(secondaryText)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(panelBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(panelStroke, lineWidth: 1)
+        )
+    }
+
+    private func settingsRowLabel(_ title: String, systemImage: String, tint: Color) -> some View {
+        HStack(spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.headline.weight(.bold))
+                .foregroundStyle(tint)
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(secondaryText)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(panelBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(panelStroke, lineWidth: 1)
+        )
     }
 
     private var midiDestinationSettings: some View {
@@ -421,7 +661,6 @@ struct ContentView: View {
                         .font(.system(size: 15, weight: .bold))
                 }
                 .buttonStyle(.bordered)
-                .disabled(midi.destinations.isEmpty)
             }
 
             Picker("MIDI Destination", selection: midiDestinationSelection) {
@@ -462,6 +701,99 @@ struct ContentView: View {
                 midi.selectDestination(destination)
             }
         }
+    }
+
+    private var midiSyncSourceSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("MIDI Sync Source", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.headline.weight(.black))
+
+                Spacer()
+
+                Button {
+                    midi.refreshSources()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .bold))
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Picker("MIDI Sync Source", selection: midiSourceSelection) {
+                Text("All Sources")
+                    .tag(allMIDISourcesID)
+
+                ForEach(midi.sources) { source in
+                    Text(source.name)
+                        .tag(source.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.large)
+            .tint(.takeCyan)
+            .disabled(midi.sources.isEmpty)
+
+            Text(midi.sources.isEmpty ? "No MIDI sources found" : midi.syncStatusMessage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(secondaryText)
+                .lineLimit(2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(panelBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(panelStroke, lineWidth: 1)
+        )
+    }
+
+    private var midiSourceSelection: Binding<MIDIUniqueID> {
+        Binding {
+            midi.selectedSourceID ?? allMIDISourcesID
+        } set: { selectedID in
+            if selectedID == allMIDISourcesID {
+                midi.selectAllSources()
+            } else if let source = midi.sources.first(where: { $0.id == selectedID }) {
+                midi.selectSource(source)
+            }
+        }
+    }
+
+    private var syncSongSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Sync Song", systemImage: "arrow.triangle.2.circlepath")
+                .font(.headline.weight(.black))
+
+            Picker("Sync Song", selection: $store.syncSong) {
+                ForEach(0...127, id: \.self) { value in
+                    Text("\(value) - \(store.title(forSong: value))")
+                        .tag(value)
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.large)
+            .tint(.takeGreen)
+
+            HStack(spacing: 8) {
+                Text("Song \(store.syncSong)")
+                    .font(.caption.monospacedDigit().weight(.black))
+                    .foregroundStyle(Color.takeGreen)
+
+                Text(store.title(forSong: store.syncSong))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(panelBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(panelStroke, lineWidth: 1)
+        )
     }
 
     private func renameSheet(for target: RenameTarget) -> some View {
@@ -662,114 +994,117 @@ private struct LibrarySelectorView: View {
 
     let kind: LibraryKind
     let title: String
+    let order: [Int]
     let accent: Color
     let secondaryText: Color
     let panelStroke: Color
     let displayName: (Int) -> String
-    let rename: () -> Void
 
     init(
         kind: LibraryKind,
         value: Binding<Int>,
         title: String,
+        order: [Int],
         accent: Color,
         secondaryText: Color,
         panelStroke: Color,
-        displayName: @escaping (Int) -> String,
-        rename: @escaping () -> Void
+        displayName: @escaping (Int) -> String
     ) {
         self.kind = kind
         self._value = value
         self.title = title
+        self.order = order
         self.accent = accent
         self.secondaryText = secondaryText
         self.panelStroke = panelStroke
         self.displayName = displayName
-        self.rename = rename
+    }
+
+    /// 1-based position of the current song within the discovered order (0 if not in it).
+    private var positionInOrder: Int {
+        (order.firstIndex(of: value)).map { $0 + 1 } ?? 0
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(accent.opacity(0.16))
+            pickerMenu {
+                HStack(alignment: .top, spacing: 14) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(accent.opacity(0.16))
 
-                    Image(systemName: kind.icon)
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(accent)
-                }
-                .frame(width: 54, height: 54)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text(kind.label)
-                            .font(.headline.weight(.black))
-
-                        Text(kind.midiLabel)
-                            .font(.caption.monospacedDigit().weight(.black))
+                        Image(systemName: kind.icon)
+                            .font(.system(size: 24, weight: .bold))
                             .foregroundStyle(accent)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                     }
+                    .frame(width: 54, height: 54)
 
-                    Text(title)
-                        .font(.title3.weight(.bold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-                }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text(kind.label)
+                                .font(.headline.weight(.black))
 
-                Spacer()
-
-                Menu {
-                    Picker(kind.label, selection: $value) {
-                        ForEach(0...127, id: \.self) { item in
-                            Text("\(item) - \(displayName(item))")
-                                .tag(item)
+                            Text(kind.midiLabel)
+                                .font(.caption.monospacedDigit().weight(.black))
+                                .foregroundStyle(accent)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         }
+
+                        Text(title)
+                            .font(.title3.weight(.bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.78)
                     }
-                } label: {
+
+                    Spacer()
+
                     Image(systemName: "list.bullet")
                         .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(accent)
                         .frame(width: 42, height: 42)
+                        .background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-                .buttonStyle(.bordered)
-                .tint(accent)
+                .contentShape(Rectangle())
             }
 
             HStack(spacing: 12) {
                 stepButton(systemName: "minus", amount: -1)
 
-                Text("\(value)")
-                    .font(.system(size: 42, weight: .black, design: .rounded).monospacedDigit())
-                    .foregroundStyle(accent)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 58)
-                    .background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                pickerMenu {
+                    Text("\(value)")
+                        .font(.system(size: 42, weight: .black).monospacedDigit())
+                        .foregroundStyle(accent)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 58)
+                        .background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .contentShape(Rectangle())
+                }
 
                 stepButton(systemName: "plus", amount: 1)
             }
 
-            HStack(spacing: 10) {
-                Button {
-                    rename()
-                } label: {
-                    Label("Rename", systemImage: "pencil")
+            pickerMenu {
+                HStack(spacing: 10) {
+                    Label("Choose \(kind.label)", systemImage: "chevron.down")
                         .font(.callout.weight(.bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .tint(accent)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-                Text("Value 0-127")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(secondaryText)
-                    .frame(width: 88, alignment: .trailing)
+                    Text(positionInOrder > 0 ? "\(positionInOrder) of \(order.count)" : "CC10 \(value)")
+                        .font(.caption.monospacedDigit().weight(.bold))
+                        .foregroundStyle(secondaryText)
+                        .frame(width: 88, alignment: .trailing)
+                }
+                .foregroundStyle(accent)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contentShape(Rectangle())
             }
         }
         .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -779,7 +1114,7 @@ private struct LibrarySelectorView: View {
 
     private func stepButton(systemName: String, amount: Int) -> some View {
         Button {
-            value = min(max(value + amount, 0), 127)
+            step(amount)
         } label: {
             Image(systemName: systemName)
                 .font(.system(size: 18, weight: .black))
@@ -787,7 +1122,41 @@ private struct LibrarySelectorView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(accent)
-        .disabled((value == 0 && amount < 0) || (value == 127 && amount > 0))
+        .disabled(stepDisabled(amount))
+    }
+
+    /// Steps through the discovered order; falls back to numeric ±1 if there's no order yet.
+    private func step(_ amount: Int) {
+        guard !order.isEmpty else {
+            value = min(max(value + amount, 0), 127)
+            return
+        }
+
+        if let index = order.firstIndex(of: value) {
+            let target = min(max(index + amount, 0), order.count - 1)
+            value = order[target]
+        } else {
+            value = amount >= 0 ? (order.first ?? value) : (order.last ?? value)
+        }
+    }
+
+    private func stepDisabled(_ amount: Int) -> Bool {
+        guard !order.isEmpty, let index = order.firstIndex(of: value) else { return false }
+        return (index == 0 && amount < 0) || (index == order.count - 1 && amount > 0)
+    }
+
+    private func pickerMenu<LabelContent: View>(@ViewBuilder label: () -> LabelContent) -> some View {
+        Menu {
+            Picker(kind.label, selection: $value) {
+                ForEach(Array(order.enumerated()), id: \.element) { index, item in
+                    Text("\(index + 1). \(displayName(item))")
+                        .tag(item)
+                }
+            }
+        } label: {
+            label()
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -817,7 +1186,7 @@ private struct ControlButtonView: View {
 
                     Spacer()
 
-                    Text("CC\(button.controlChange)")
+                    Text(button.displayMessage)
                         .font(.headline.monospacedDigit().weight(.black))
                         .foregroundStyle(.white.opacity(0.92))
                 }
@@ -860,12 +1229,7 @@ private struct ControlButtonView: View {
     }
 
     private var detailText: String {
-        switch button.valueMode {
-        case .any:
-            return "CC\(button.controlChange) any"
-        case .fixed(let value):
-            return "CC\(button.controlChange) value \(value)"
-        }
+        button.detailMessage
     }
 
     private var buttonFill: LinearGradient {
@@ -886,6 +1250,336 @@ private struct PressableButtonStyle: ButtonStyle {
     }
 }
 
+private struct SongEditorView: View {
+    @EnvironmentObject private var store: ControllerStore
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(store.knownSongs.sorted(), id: \.self) { value in
+                    SongEditorRow(value: value)
+                }
+                .onDelete { offsets in
+                    let sorted = store.knownSongs.sorted()
+                    for index in offsets where sorted.indices.contains(index) {
+                        store.removeSong(sorted[index])
+                    }
+                }
+            } header: {
+                Text("\(store.knownSongs.count) Songs")
+            } footer: {
+                Text("Edit a name, or tap a song's number to move it to a free slot. Swipe to delete.")
+            }
+
+            Section {
+                Button {
+                    addSong()
+                } label: {
+                    Label("Add Song", systemImage: "plus")
+                }
+                .disabled(firstFreeSlot == nil)
+            }
+        }
+        .navigationTitle("Songs")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var firstFreeSlot: Int? {
+        (0...127).first { !store.knownSongs.contains($0) }
+    }
+
+    private func addSong() {
+        guard let slot = firstFreeSlot else { return }
+        store.setSong(slot, name: "New Song")
+    }
+}
+
+private struct SongEditorRow: View {
+    @EnvironmentObject private var store: ControllerStore
+    let value: Int
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Menu {
+                Picker("Number", selection: numberBinding) {
+                    ForEach(availableNumbers, id: \.self) { number in
+                        Text("\(number)").tag(number)
+                    }
+                }
+            } label: {
+                Text("\(value)")
+                    .font(.headline.monospacedDigit().weight(.black))
+                    .foregroundStyle(Color.takeCyan)
+                    .frame(minWidth: 40)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 8)
+                    .background(Color.takeCyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
+            TextField("Song name", text: nameBinding)
+                .textInputAutocapitalization(.words)
+        }
+    }
+
+    private var availableNumbers: [Int] {
+        ([value] + (0...127).filter { !store.knownSongs.contains($0) }).sorted()
+    }
+
+    private var numberBinding: Binding<Int> {
+        Binding {
+            value
+        } set: { newValue in
+            if newValue != value {
+                store.remapSong(from: value, to: newValue)
+            }
+        }
+    }
+
+    private var nameBinding: Binding<String> {
+        Binding {
+            let override = store.songNames[value] ?? ""
+            if !override.isEmpty { return override }
+            return SongLibrary.defaultSongNames[value] ?? ""
+        } set: { newName in
+            store.renameSong(value, newName)
+        }
+    }
+}
+
+private struct SetlistEditorView: View {
+    @EnvironmentObject private var store: ControllerStore
+
+    var body: some View {
+        List {
+            Section {
+                Picker("Editing", selection: setlistSelection) {
+                    Text("Select a setlist…").tag(Int?.none)
+                    ForEach(store.setlistSlots, id: \.self) { slot in
+                        Text(store.setlistName(slot)).tag(Int?.some(slot))
+                    }
+                }
+
+                Button {
+                    store.createSetlist()
+                } label: {
+                    Label("New Setlist", systemImage: "plus")
+                }
+            } footer: {
+                Text("Setlists are built by hand from the Song Library. The Stadium is cued by each song's library position, so any order works.")
+            }
+
+            if let slot = store.activeSetlistSlot {
+                Section {
+                    let order = store.songs(forPlaylist: slot)
+                    if order.isEmpty {
+                        Text("No songs yet — add from the Library below.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(order, id: \.self) { song in
+                            songLabel(song, accent: .takeViolet)
+                        }
+                        .onMove { source, destination in
+                            store.moveSongs(inPlaylist: slot, from: source, to: destination)
+                        }
+                        .onDelete { offsets in
+                            store.removeSongs(at: offsets, fromPlaylist: slot)
+                        }
+                    }
+                } header: {
+                    Text("Order — \(store.songs(forPlaylist: slot).count) songs")
+                } footer: {
+                    Text("Drag to reorder (Edit), swipe to remove.")
+                }
+
+                Section {
+                    let available = store.availableSongs(forPlaylist: slot)
+                    if available.isEmpty {
+                        Text("Every library song is already in this setlist.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(available, id: \.self) { song in
+                            Button {
+                                store.addSong(song, toPlaylist: slot)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "plus.circle.fill")
+                                        .foregroundStyle(Color.takeGreen)
+                                    songLabel(song)
+                                    Spacer()
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Add from Library")
+                }
+            } else {
+                Section {
+                    Text("Pick a setlist above, or create one, to edit its order.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle("Setlists")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { EditButton() }
+    }
+
+    private var setlistSelection: Binding<Int?> {
+        Binding {
+            store.activeSetlistSlot
+        } set: { newValue in
+            store.activeSetlistSlot = newValue
+        }
+    }
+
+    private func songLabel(_ song: Int, accent: Color = .takeGreen) -> some View {
+        HStack(spacing: 10) {
+            Text("\(song)")
+                .font(.subheadline.monospacedDigit().weight(.black))
+                .foregroundStyle(accent)
+                .frame(minWidth: 36, alignment: .leading)
+
+            Text(store.title(forSong: song))
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct MIDIMonitorView: View {
+    @ObservedObject var midi: MIDIManager
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+
+    private let bottomAnchor = "monitor-bottom"
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                controls
+                Divider()
+                logScroll
+            }
+            .background(background.ignoresSafeArea())
+            .navigationTitle("MIDI Monitor")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    ShareLink(item: midi.logText) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .disabled(midi.logLines.isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    private var controls: some View {
+        HStack(spacing: 14) {
+            Toggle(isOn: $midi.isMonitoringEnabled) {
+                Label(
+                    midi.isMonitoringEnabled ? "Monitoring" : "Paused",
+                    systemImage: midi.isMonitoringEnabled ? "dot.radiowaves.left.and.right" : "pause.circle"
+                )
+                .font(.subheadline.weight(.bold))
+            }
+            .toggleStyle(.button)
+            .tint(.takeGreen)
+
+            Spacer()
+
+            Text("\(midi.logLines.count) events")
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(secondaryText)
+
+            Button(role: .destructive) {
+                midi.clearLog()
+            } label: {
+                Label("Clear", systemImage: "trash")
+                    .font(.subheadline.weight(.bold))
+            }
+            .buttonStyle(.bordered)
+            .tint(.takeRed)
+            .disabled(midi.logLines.isEmpty)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+
+    private var logScroll: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 3) {
+                    if midi.logLines.isEmpty {
+                        emptyState
+                    } else {
+                        ForEach(Array(midi.logLines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(.caption, design: .monospaced).weight(.medium))
+                                .foregroundStyle(color(for: line))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomAnchor)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+            }
+            .onChange(of: midi.logLines.count) { _, _ in
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                }
+            }
+            .onAppear {
+                proxy.scrollTo(bottomAnchor, anchor: .bottom)
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "waveform.path")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(secondaryText.opacity(0.7))
+
+            Text(midi.isMonitoringEnabled ? "Waiting for MIDI traffic…" : "Monitoring is paused")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(secondaryText)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 64)
+    }
+
+    private func color(for line: String) -> Color {
+        if line.contains("→") {
+            return .takeCyan
+        } else if line.contains("←") {
+            return .takeGreen
+        }
+        return secondaryText
+    }
+
+    private var secondaryText: Color {
+        colorScheme == .dark
+            ? Color(red: 0.70, green: 0.73, blue: 0.78)
+            : Color(red: 0.37, green: 0.40, blue: 0.46)
+    }
+
+    private var background: Color {
+        colorScheme == .dark
+            ? Color(red: 0.05, green: 0.06, blue: 0.08)
+            : Color(red: 0.96, green: 0.97, blue: 0.98)
+    }
+}
+
 private extension Color {
     static let takeRed = Color(red: 0.94, green: 0.05, blue: 0.08)
     static let takeGold = Color(red: 1.00, green: 0.58, blue: 0.10)
@@ -900,4 +1594,10 @@ private extension Color {
     static let takeTeal = Color(red: 0.00, green: 0.53, blue: 0.57)
     static let takeIndigo = Color(red: 0.23, green: 0.29, blue: 0.86)
     static let takeViolet = Color(red: 0.63, green: 0.22, blue: 0.86)
+}
+
+#Preview {
+    ContentView()
+        .environmentObject(ControllerStore())
+        .environmentObject(MIDIManager())
 }
