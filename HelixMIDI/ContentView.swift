@@ -389,8 +389,8 @@ struct ContentView: View {
         guard !midi.isScanning else { return }
         let limit = store.syncScanLimit
         Task {
-            if let order = await midi.scanSongs(upTo: limit) {
-                store.applyScannedOrder(order)
+            if let scanned = await midi.scanSongs(upTo: limit) {
+                store.applyScannedOrder(scanned)
             }
         }
     }

@@ -188,7 +188,7 @@ final class MIDIManager: ObservableObject {
     /// cap is hit. Returns the ordered list of song values, or nil if it couldn't run / found
     /// nothing.
     @discardableResult
-    func scanSongs(perSlotTimeout: Duration = .milliseconds(900), upTo limit: Int = 127) async -> [Int]? {
+    func scanSongs(perSlotTimeout: Duration = .milliseconds(1300), upTo limit: Int = 127) async -> [(identity: Int, position: Int)]? {
         guard !isScanning else { return nil }
 
         refreshDestinations()
@@ -214,7 +214,9 @@ final class MIDIManager: ObservableObject {
         _ = send(bytes: [0xB0, 63, 0])
         try? await Task.sleep(for: .milliseconds(160))
 
-        var order: [Int] = []
+        // Each entry is (identity, absolute Helix position). Position = the step index, so a
+        // markerless song that gets skipped never shifts the cue positions of later songs.
+        var found: [(identity: Int, position: Int)] = []
         var seen: Set<Int> = []
         var consecutiveSilent = 0
         let maxConsecutiveSilent = 4   // tolerate a few markerless songs before calling it the end
@@ -222,24 +224,29 @@ final class MIDIManager: ObservableObject {
         for step in 0..<cap {
             if scanStopped { break }
 
-            let value = await playAndAwaitSongValue(timeout: perSlotTimeout)
+            var value = await playAndAwaitSongValue(timeout: perSlotTimeout)
+            // A just-loaded / slow song can miss the first window — give it one retry before
+            // we treat the position as silent.
+            if value == nil && !scanStopped {
+                value = await playAndAwaitSongValue(timeout: perSlotTimeout)
+            }
             if scanStopped { break }
 
             if let value {
                 let name = SongLibrary.defaultSongNames[value] ?? "?"
                 if seen.contains(value) {
-                    appendLog("⟳ Position \(step + 1): heard Song \(value) (\(name)) again — wrapped, done")
+                    appendLog("⟳ Slot \(step): heard Song \(value) (\(name)) again — wrapped, done")
                     break
                 }
-                appendLog("⟳ Position \(step + 1): heard Song \(value) (\(name))")
+                appendLog("⟳ Slot \(step): heard Song \(value) (\(name))")
                 seen.insert(value)
-                order.append(value)
-                scanFoundCount = order.count
+                found.append((identity: value, position: step))
+                scanFoundCount = found.count
                 consecutiveSilent = 0
             } else {
-                // Silent position: a song with no 00:00 marker (or past the end). Skip it,
-                // but give up after several in a row — that's the tail of the setlist.
-                appendLog("⟳ Position \(step + 1): silent (no marker)")
+                // Silent position: a song with no 00:00 marker (or past the end). Skip it (its
+                // slot is still accounted for via `step`), but give up after several in a row.
+                appendLog("⟳ Slot \(step): silent (no marker)")
                 consecutiveSilent += 1
                 if consecutiveSilent >= maxConsecutiveSilent { break }
             }
@@ -257,11 +264,11 @@ final class MIDIManager: ObservableObject {
         let stopped = scanStopped
         isScanning = false
         syncStatusMessage = stopped
-            ? "Scan stopped — \(order.count) songs"
-            : "Scan complete — \(order.count) songs in order"
+            ? "Scan stopped — \(found.count) songs"
+            : "Scan complete — \(found.count) songs in order"
 
-        guard !order.isEmpty else { return nil }
-        return order
+        guard !found.isEmpty else { return nil }
+        return found
     }
 
     /// Stops the scan early, keeping whatever order was found so far.

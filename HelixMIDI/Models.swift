@@ -136,10 +136,15 @@ final class ControllerStore: ObservableObject {
         didSet { savePlaylistSongs() }
     }
 
-    /// The Song Library: the Stadium's own song order discovered by SYNC (index = cue
-    /// position, value = song identity). The source of truth for cueing.
+    /// The Song Library: song identities discovered by SYNC, in discovery order (for display).
     @Published var songLibraryOrder: [Int] {
         didSet { defaults.set(songLibraryOrder, forKey: Keys.songLibrary) }
+    }
+
+    /// Parallel to songLibraryOrder: the ABSOLUTE Stadium cue position of each library song.
+    /// Kept separate from the index so a skipped (markerless) song never shifts cue positions.
+    @Published var songLibraryPositions: [Int] {
+        didSet { defaults.set(songLibraryPositions, forKey: Keys.songLibraryPositions) }
     }
 
     /// Which setlist is active. nil = Library mode (pick any song in library order); otherwise
@@ -179,6 +184,7 @@ final class ControllerStore: ObservableObject {
 
         self.playlistSongs = Self.loadPlaylistSongs(from: defaults)
         self.songLibraryOrder = (defaults.array(forKey: Keys.songLibrary) as? [Int])?.filter { (0...127).contains($0) } ?? []
+        self.songLibraryPositions = (defaults.array(forKey: Keys.songLibraryPositions) as? [Int]) ?? []
         self.activeSetlistSlot = defaults.object(forKey: Keys.activeSetlist) as? Int
     }
 
@@ -210,11 +216,12 @@ final class ControllerStore: ObservableObject {
     /// Applies a SYNC scan result: it populates the SONG LIBRARY (the Stadium's own order /
     /// cue map), NOT a setlist. Those songs become the known set and the current song jumps
     /// to the top. Setlists are built by hand from the library and are left untouched.
-    func applyScannedOrder(_ order: [Int]) {
-        songLibraryOrder = order
-        knownSongs = Set(order)
+    func applyScannedOrder(_ scanned: [(identity: Int, position: Int)]) {
+        songLibraryOrder = scanned.map(\.identity)
+        songLibraryPositions = scanned.map(\.position)
+        knownSongs = Set(songLibraryOrder)
         activeSetlistSlot = nil // return to Library so the fresh scan is what's shown
-        if let first = order.first {
+        if let first = songLibraryOrder.first {
             selectedSong = first
         }
     }
@@ -316,7 +323,10 @@ final class ControllerStore: ObservableObject {
     /// song we know by identity, send its index in the SONG LIBRARY (the Stadium's own order
     /// from SYNC) — never the setlist order, which the Stadium knows nothing about.
     func cuePosition(forSong identity: Int) -> Int? {
-        songLibraryOrder.firstIndex(of: identity)
+        guard let index = songLibraryOrder.firstIndex(of: identity) else { return nil }
+        // Use the recorded absolute position; fall back to the index only if positions are
+        // missing (e.g. an old persisted library from before positions were tracked).
+        return songLibraryPositions.indices.contains(index) ? songLibraryPositions[index] : index
     }
 
     /// Synced Library songs not already in the given setlist, in Library order — candidates
@@ -533,6 +543,7 @@ final class ControllerStore: ObservableObject {
         static let didSeedSongs = "didSeedSongs"
         static let playlistSongs = "playlistSongs"
         static let songLibrary = "songLibrary"
+        static let songLibraryPositions = "songLibraryPositions"
         static let activeSetlist = "activeSetlist"
     }
 }
